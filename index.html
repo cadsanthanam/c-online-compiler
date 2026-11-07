@@ -78,6 +78,7 @@ const CLANG = [
   "https://cdn.jsdelivr.net/npm/@yowasp/clang@21.1.4-3/gen/bundle.js",
   "https://unpkg.com/@yowasp/clang@21.1.4-3/gen/bundle.js"
 ];
+const CONIO = '#include <stdio.h>\nstatic inline int getch(void){return getchar();}\nstatic inline int getche(void){return getchar();}\n#define clrscr() printf("\\033[2J\\033[H")\n';
 const SHIM = "https://cdn.jsdelivr.net/npm/@bjorn3/browser_wasi_shim@0.4.2/dist/index.js";
 // Makes printf text appear immediately (before scanf waits). #line 1 keeps error line numbers correct.
 const PRE = '#include <stdio.h>\n__attribute__((constructor)) static void __rec_init(void){ setvbuf(stdout, 0, _IONBF, 0); }\n#line 1\n';
@@ -116,8 +117,8 @@ function compilerWorkerMain() {
       let diag = '';
       const sink = b => { if (b) diag += dec.decode(b, {stream: true}); };
       try {
-        const f = await clang.runClang(['clang', '-std=c17', '-Wall', '-Wextra', 'main.c', '-o', 'main.wasm', '-lm'],
-                                       {'main.c': PRE + m.code}, {stdout: sink, stderr: sink});
+        const f = await clang.runClang(['clang', '-std=c17', '-Wall', '-Wextra', '-I.', 'main.c', '-o', 'main.wasm', '-lm', '-Wl,-z,stack-size=8388608'],
+                                       {'main.c': PRE + m.code.replace(/\bvoid\s+main\s*\(/g, 'int main(').replace(/^(\s*)main\s*\(/gm, '$1int main('), 'conio.h': CONIO}, {stdout: sink, stderr: sink});
         const wasm = f['main.wasm'].slice();
         postMessage({t: 'compiled', wasm, diag}, [wasm.buffer]);
       } catch (e) { postMessage({t: 'cerror', diag: diag || String((e && e.message) || e)}); }
@@ -192,11 +193,14 @@ $('pill').className = live ? '' : 'off';
 if (!live) $('preWrap').hidden = false;
 
 const mkWorker = src => new Worker(URL.createObjectURL(new Blob([src], {type: 'text/javascript'})), {type: 'module'});
-const compSrc = 'const BASES=' + JSON.stringify(CLANG) + ';const PRE=' + JSON.stringify(PRE) + ';(' + compilerWorkerMain.toString() + ')();';
+const compSrc = 'const BASES=' + JSON.stringify(CLANG) + ';const PRE=' + JSON.stringify(PRE) + ';const CONIO=' + JSON.stringify(CONIO) + ';(' + compilerWorkerMain.toString() + ')();';
 const runSrc = 'const SHIM=' + JSON.stringify(SHIM) + ';(' + runWorkerMain.toString() + ')();';
 
 function setStatus(t, cls) { $('status').textContent = t; $('status').className = cls || ''; }
 function print(text, cls) {
+  if (text.includes('\x1b[2J')) con.textContent = '';          // clrscr() clears the output
+  text = text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+  if (!text) return;
   const s = document.createElement('span'); if (cls) s.className = cls; s.textContent = text;
   con.appendChild(s);
   if (con.textContent.length > 200000) con.firstChild.remove();
