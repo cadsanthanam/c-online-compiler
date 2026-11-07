@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C Compiler – live input test</title>
+<style>
+  body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:0;background:#faf8fc;color:#222}
+  header{background:#4b1d7a;color:#fff;padding:10px 16px;border-bottom:4px solid #e0b13a}
+  header h1{margin:0;font-size:19px}
+  .wrap{padding:12px 16px;max-width:900px;margin:auto}
+  #banner{padding:8px 10px;border-radius:6px;font-size:14px;margin-bottom:10px}
+  #banner.on{background:#e3f6e8;border-left:4px solid #2a9d4b}
+  #banner.off{background:#fff6dc;border-left:4px solid #e0b13a}
+  .row{display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap}
+  button{padding:8px 16px;border:1px solid #4b1d7a;border-radius:6px;background:#fff;color:#4b1d7a;font-size:14px;cursor:pointer}
+  button#run{background:#4b1d7a;color:#fff;font-weight:600}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  #status{font-size:14px;color:#555} #status.ok{color:#2a7d3f} #status.err{color:#c0392b}
+  textarea{width:100%;box-sizing:border-box;font-family:Consolas,monospace;font-size:14px;border:1px solid #d9d0e6;border-radius:6px;padding:8px}
+  #code{height:250px}
+  #pre{height:50px}
+  #con{background:#1e1e2a;color:#e8e8f0;border-radius:6px 6px 0 0;padding:10px;height:260px;overflow:auto;white-space:pre-wrap;word-break:break-all;font-family:Consolas,monospace;font-size:14px;margin:8px 0 0}
+  #con .err{color:#ff9d9d} #con .warn{color:#ffd37a} #con .dim{color:#8a8aa0} #con .in{color:#8fe3a0}
+  #inrow{display:flex;gap:6px;align-items:center;background:#2c2c3e;padding:6px 10px;border-radius:0 0 6px 6px}
+  #inrow[hidden]{display:none}
+  #inrow span{color:#8fe3a0}
+  #inp{flex:1;background:#1e1e2a;color:#8fe3a0;border:1px solid #555;border-radius:4px;padding:6px;font-family:Consolas,monospace;font-size:14px}
+</style>
+</head>
+<body>
+<header><h1>C Online Compiler — live input test (proof of concept)</h1></header>
+<div class="wrap">
+  <div id="banner"></div>
+  <div class="row">
+    <button id="run" disabled>▶ Run</button>
+    <button id="stop" disabled>■ Stop</button>
+    <span id="status">Loading compiler (first visit downloads about 30 MB, later visits are fast)…</span>
+  </div>
+  <textarea id="code" spellcheck="false"></textarea>
+  <div id="preWrap" hidden>
+    <p style="font-size:13px;margin:8px 0 2px">Input box (used only because live input is off on this page):</p>
+    <textarea id="pre" spellcheck="false" placeholder="e.g. 7 9"></textarea>
+  </div>
+  <pre id="con">Press Run to compile and execute your program.</pre>
+  <div id="inrow" hidden><span>▶</span><input id="inp" autocomplete="off" placeholder="Program is waiting for input: type here and press Enter (Ctrl+D = end of input)"></div>
+</div>
+
+<script>
+// ---------- Settings ----------
+const CLANG = [
+  "https://cdn.jsdelivr.net/npm/@yowasp/clang@21.1.4-3/gen/bundle.js",
+  "https://unpkg.com/@yowasp/clang@21.1.4-3/gen/bundle.js"
+];
+const SHIM = "https://cdn.jsdelivr.net/npm/@bjorn3/browser_wasi_shim@0.4.2/dist/index.js";
+// Makes printf text appear immediately (before scanf waits). #line 1 keeps error line numbers correct.
+const PRE = '#include <stdio.h>\n__attribute__((constructor)) static void __rec_init(void){ setvbuf(stdout, 0, _IONBF, 0); }\n#line 1\n';
+const SAMPLE = '#include <stdio.h>\n\nint main(void) {\n    int a, b;\n    printf("Enter two numbers: ");\n    scanf("%d %d", &a, &b);\n    printf("Sum = %d\\n", a + b);\n    printf("Your name? ");\n    char name[50];\n    scanf("%49s", name);\n    printf("Hello, %s!\\n", name);\n    return 0;\n}\n';
+
+// ---------- Worker 1: the compiler (stays alive between runs) ----------
+function compilerWorkerMain() {
+  let clang = null;
+  const dec = new TextDecoder();
+  async function load() {
+    let last;
+    for (const u of BASES) {
+      try {
+        const m = await import(u);
+        await m.runClang(['clang', 'w.c', '-o', 'w.wasm'], {'w.c': 'int main(void){return 0;}'}, {
+          stdout: () => {}, stderr: () => {},
+          fetchProgress: e => postMessage({t: 'prog', done: e.doneLength, total: e.totalLength})
+        });
+        clang = m; return;
+      } catch (e) { last = e; }
+    }
+    throw last;
+  }
+  onmessage = async ev => {
+    const m = ev.data;
+    if (m.t === 'init') {
+      try { await load(); postMessage({t: 'ready'}); }
+      catch (e) { postMessage({t: 'fail', msg: String((e && e.message) || e)}); }
+    } else if (m.t === 'compile') {
+      let diag = '';
+      const sink = b => { if (b) diag += dec.decode(b, {stream: true}); };
+      try {
+        const f = await clang.runClang(['clang', '-std=c17', '-Wall', '-Wextra', 'main.c', '-o', 'main.wasm', '-lm'],
+                                       {'main.c': PRE + m.code}, {stdout: sink, stderr: sink});
+        const wasm = f['main.wasm'].slice();
+        postMessage({t: 'compiled', wasm, diag}, [wasm.buffer]);
+      } catch (e) { postMessage({t: 'cerror', diag: diag || String((e && e.message) || e)}); }
+    }
+  };
+}
+
+// ---------- Worker 2: runs the compiled program (a new one per run, so Stop can kill it) ----------
+function runWorkerMain() {
+  onmessage = async ev => {
+    const {wasm, sab, prefillBytes} = ev.data;
+    const {WASI, Fd, wasi} = await import(SHIM);
+    const ctl = sab ? new Int32Array(sab, 0, 2) : null;
+    const buf = sab ? new Uint8Array(sab, 8) : null;
+    let pending = sab ? new Uint8Array(0) : prefillBytes;
+    let eof = false;
+    const CD = () => new wasi.Fdstat(wasi.FILETYPE_CHARACTER_DEVICE, 0);
+    class In extends Fd {
+      fd_read(size) {
+        if (!pending.length && sab && !eof) {
+          Atomics.store(ctl, 0, 0);
+          postMessage({t: 'need'});
+          Atomics.wait(ctl, 0, 0);               // sleeps here until the page sends input
+          if (Atomics.load(ctl, 0) === 2) eof = true;
+          else pending = buf.slice(0, Atomics.load(ctl, 1));
+        }
+        const out = pending.slice(0, size);
+        pending = pending.slice(out.length);
+        return {ret: 0, data: out};
+      }
+      fd_fdstat_get() { return {ret: 0, fdstat: CD()}; }
+    }
+    class Out extends Fd {
+      constructor(k) { super(); this.k = k; this.d = new TextDecoder(); }
+      fd_write(data) {
+        postMessage({t: 'out', k: this.k, text: this.d.decode(data, {stream: true})});
+        return {ret: 0, nwritten: data.byteLength};
+      }
+      fd_fdstat_get() { return {ret: 0, fdstat: CD()}; }
+    }
+    const w = new WASI(['main'], [], [new In(), new Out('o'), new Out('e')]);
+    try {
+      const {instance} = await WebAssembly.instantiate(wasm, {wasi_snapshot_preview1: w.wasiImport});
+      const code = w.start(instance);
+      postMessage({t: 'exit', code});
+    } catch (e) { postMessage({t: 'crash', msg: String((e && e.message) || e)}); }
+  };
+}
+
+// ---------- Page ----------
+const $ = id => document.getElementById(id);
+const live = self.crossOriginIsolated === true;
+const con = $('con');
+$('code').value = SAMPLE;
+$('banner').className = live ? 'on' : 'off';
+$('banner').textContent = live
+  ? 'Live input: ON. The program will pause at scanf and wait for you to type.'
+  : 'Live input: OFF. This page is not served with the required security headers (normal when opened by double-clicking the file). Type all input in the Input box before pressing Run.';
+if (!live) $('preWrap').hidden = false;
+
+const mkWorker = src => new Worker(URL.createObjectURL(new Blob([src], {type: 'text/javascript'})), {type: 'module'});
+const compSrc = 'const BASES=' + JSON.stringify(CLANG) + ';const PRE=' + JSON.stringify(PRE) + ';(' + compilerWorkerMain.toString() + ')();';
+const runSrc = 'const SHIM=' + JSON.stringify(SHIM) + ';(' + runWorkerMain.toString() + ')();';
+
+function setStatus(t, cls) { $('status').textContent = t; $('status').className = cls || ''; }
+function print(text, cls) {
+  const s = document.createElement('span'); if (cls) s.className = cls; s.textContent = text;
+  con.appendChild(s);
+  if (con.textContent.length > 200000) con.firstChild.remove();
+  con.scrollTop = con.scrollHeight;
+}
+
+let ready = false, resolveCompile = null, rw = null, timer = null, running = false, sab = null;
+const compW = mkWorker(compSrc);
+compW.onmessage = e => {
+  const m = e.data;
+  if (m.t === 'prog') setStatus('Downloading compiler… ' + (m.total ? Math.round(100 * m.done / m.total) + '%' : ''));
+  else if (m.t === 'ready') { ready = true; $('run').disabled = false; setStatus('Compiler ready.', 'ok'); }
+  else if (m.t === 'fail') setStatus('Could not load the compiler: ' + m.msg, 'err');
+  else if (m.t === 'compiled' || m.t === 'cerror') { if (resolveCompile) resolveCompile(m); }
+};
+compW.onerror = e => setStatus('Compiler worker error: ' + (e.message || 'could not start'), 'err');
+compW.postMessage({t: 'init'});
+
+function armTimer() {
+  clearTimeout(timer);
+  timer = setTimeout(() => kill('⏱ Stopped: the program ran for 10 seconds without finishing (infinite loop?).'), 10000);
+}
+function kill(msg) {
+  if (rw) { rw.terminate(); rw = null; }
+  clearTimeout(timer); running = false;
+  $('inrow').hidden = true; $('stop').disabled = true; $('run').disabled = !ready;
+  if (msg) { print('\n' + msg + '\n', 'err'); setStatus('Stopped', 'err'); }
+}
+
+async function run() {
+  if (running || !ready) return;
+  running = true; $('run').disabled = true; con.textContent = ''; setStatus('Compiling…');
+  const m = await new Promise(r => { resolveCompile = r; compW.postMessage({t: 'compile', code: $('code').value}); });
+  if (m.t === 'cerror') { print(m.diag, 'err'); setStatus('Compile error', 'err'); running = false; $('run').disabled = false; return; }
+  if (m.diag) print(m.diag + '\n--- program output ---\n', 'warn');
+  setStatus('Running…'); $('stop').disabled = false;
+  sab = live ? new SharedArrayBuffer(8 + 65536) : null;
+  rw = mkWorker(runSrc);
+  rw.onmessage = ev => {
+    const d = ev.data;
+    if (d.t === 'out') print(d.text, d.k === 'e' ? 'err' : '');
+    else if (d.t === 'need') { clearTimeout(timer); $('inrow').hidden = false; $('inp').focus(); setStatus('Waiting for your input…'); }
+    else if (d.t === 'exit') { kill(); print('\n[Program finished, exit code ' + d.code + ']\n', 'dim'); setStatus('Finished', 'ok'); }
+    else if (d.t === 'crash') { kill(); print('\n[Runtime error: ' + d.msg + ']\n', 'err'); setStatus('Runtime error', 'err'); }
+  };
+  rw.onerror = e => { kill(); print('\n[Could not start the program: ' + (e.message || 'worker error') + ']\n', 'err'); setStatus('Error', 'err'); };
+  armTimer();
+  rw.postMessage({wasm: m.wasm, sab, prefillBytes: new TextEncoder().encode($('pre').value)}, [m.wasm.buffer]);
+}
+
+function sendInput(text, isEof) {
+  const ctl = new Int32Array(sab, 0, 2);
+  if (isEof) { Atomics.store(ctl, 0, 2); }
+  else {
+    const b = new TextEncoder().encode(text).slice(0, 65536);
+    new Uint8Array(sab, 8).set(b);
+    Atomics.store(ctl, 1, b.length); Atomics.store(ctl, 0, 1);
+    print(text, 'in');
+  }
+  Atomics.notify(ctl, 0);
+  $('inp').value = ''; $('inrow').hidden = true; setStatus('Running…'); armTimer();
+}
+$('inp').onkeydown = e => {
+  if (e.key === 'Enter') sendInput($('inp').value + '\n', false);
+  else if (e.key === 'd' && e.ctrlKey) { e.preventDefault(); print('^D\n', 'dim'); sendInput('', true); }
+};
+$('run').onclick = run;
+$('stop').onclick = () => kill('■ Stopped by you.');
+$('code').addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') run(); });
+</script>
+</body>
+</html>
